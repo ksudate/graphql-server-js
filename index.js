@@ -1,106 +1,30 @@
-// apollo-serverモジュールを読み込む
-const { ApolloServer } = require(`apollo-server`)
-
+const { authorizeWithGithub } = require('./lib')
+const { ApolloServer } = require(`apollo-server-express`)
+const express = require(`express`)
+const expressPlayground = require(`graphql-playground-middleware-express`).default
+const { readFileSync } = require(`fs`)
 const { GraphQLScalarType } = require(`graphql`)
 
-const typeDefs = ` 
-  scalar DateTime
-  enum PhotoCategory {
-    SELFIE
-    PORTRAIT
-    ACTION
-    LANDSCAPE
-    GRAPHIC
-  }
-  # Photo型を定義します
-  type Photo {
-    id: ID!
-    url: String!
-    name: String!
-    description: String
-    category: PhotoCategory!
-    postedBy: User!
-    taggedUsers: [User!]!
-    created: DateTime!
-  }
-
-  # allPhotosはPhotoを返します
-  type Query {
-    totalPhotos: Int!
-    allPhotos(after: DateTime): [Photo!]!
-  }
-
-  input PostPhotoInput {
-    name: String!
-    category: PhotoCategory=PORTRAIT
-    description: String
-  }
-
-  # ミューテーションによって新たに投稿されたPhotoを返します 
-  type Mutation {
-    postPhoto(input: PostPhotoInput!): Photo!
-  }
-
-  type User {
-    githubLogin: ID!
-    name: String
-    avatar: String
-    postedPhotos: [Photo!]!
-    inPhotos: [Photo!]!
-  }
-`
-
-// 写真を格納するための配列を定義する
-var _id = 0
-var users = [
-  { "githubLogin": "mHattrup", "name": "Mike Hattrup" },
-  { "githubLogin": "gPlake", "name": "Glen Plake" },
-  { "githubLogin": "sSchmidt", "name": "Scot Schmidt" }
-]
-var photos = [
-  {
-    "id": "1",
-    "name": "Dropping the Heart Chute",
-    "description": "the 1",
-    "category": "ACTION",
-    "githubUser": "gPlake",
-    "created": "3-28-1977"
-  },
-  {
-    "id": "2",
-    "name": "Enjoying the sunshine",
-    "description": "the 2",
-    "category": "SELFIE",
-    "githubUser": "sSchmidt",
-    "created": "1-2-1985"
-  },
-  {
-    "id": "3",
-    "name": "Gunbarrel 25",
-    "description": "the 3",
-    "category": "LANDSCAPE",
-    "githubUser": "sSchmidt",
-    "created": "2018-04-15T19:09:57.308Z"
-  }
-]
-var tags = [
-  { "photoID": "1", "userID": "gPlake" },
-  { "photoID": "2", "userID": "sSchmidt" },
-  { "photoID": "2", "userID": "mHattrup" },
-  { "photoID": "2", "userID": "gPlake" }
-]
-
-//const serialize = VALue => new Date(value).toISOString()
-
-//const parseValue = value => new Date(value)
-
-//const parseLiteral = ast => ast.value
+const { MongoClient } = require(`mongodb`)
+require(`dotenv`).config()
+const typeDefs = readFileSync(`./typeDefs.graphql`, `UTF-8`)
 
 const resolvers = {
   Query: {
-    // 写真を格納した配列の長さを返す
-    totalPhotos: () => photos.length,
-    allPhotos: () => photos
+    totalPhotos: (parent, args, { db }) => 
+      db.collection(`photos`)
+      .estimatedDocumentCount(),
+    allPhotos: (parent, args, { db }) =>
+      db.collection(`photos`)
+      .find()
+      .toArray(),
+    totalUsers: (parent, args, { db }) =>
+      db.collection(`users`)
+      .estimatedDocumentCount(),
+    totalUsers: (parent, args, { db }) =>
+      db.collection(`users`)
+      .find()
+      .toArray()
   },
 
   Mutation: {
@@ -111,7 +35,38 @@ const resolvers = {
       }
       photos.push(newPhoto)
      return newPhoto
-    }
+    },
+    async githubAuth(parent, { code }, { db }) {
+      let {
+        message,
+        access_token,
+        avatar_url,
+        login,
+        name
+      } = await authorizeWithGithub({
+        client_id: process.env.CLIENT_ID,
+        client_secret: process.env.CLIENT_SECRET,
+        code
+      })
+
+      if (message) {
+        throw new Error(message)
+      }
+    
+      let latestUserInfo = {
+        name,
+        githubLogin: login,
+        githubToken: access_token,
+        avatar: avatar_url
+      }
+      console.log(latestUserInfo)
+      console.log(db)
+      const { ops:[user] } = await db
+        .collection('users')
+        .replaceOne({ githubLogin: login }, latestUserInfo, { upsert: true })
+
+      return { user, token: access_token }
+    },
   },
 
   Photo: {
@@ -147,17 +102,40 @@ const resolvers = {
     parseValue: value => new Date(value),
     serialize: value => new Date(value).toISOString(),
     parseLiteral: ast => ast.value
-  })
+  }),
+  
 }
 
-// サーバーのインスタンスを作成
-// その際、typeDefs(スキーマ)とリゾルバを引数にとる
-const server = new ApolloServer({
-  typeDefs,
-  resolvers
-})
+async function start() {
+  const app = express()
+  const MONGO_DB = process.env.DB_HOST
+  let db
+  try {
+    const client = await MongoClient.connect(MONGO_DB, { useNewUrlParser: true })
+    db = client.db('test') 
+    console.log(db)
+  } catch (error) {
+    console.log(`
+    
+      Mongo DB Host not found!
+      please add DB_HOST environment variable to .env file
+      exiting...
+       
+    `)
+    process.exit(1)
+  }
+  const context = { db }
+  const server = new ApolloServer(
+    { typeDefs, resolvers }
+  )
+  server.applyMiddleware({ app })
+  app.get(`/`, (req, res) => res.end(`Welcome to the PhotoShare API`))
+  app.get(`/playground`,expressPlayground({ endpoint: `/graphql`}))
 
-// Webサーバを起動
-server
-  .listen()
-  .then(({url}) => console.log(`GraphQL Service running on ${url}`))
+  app.listen({ port: 4000 }, () =>
+    console.log(`GraphQL Server running @ http://localhost:4000${server.graphqlPath}`)
+  )
+}
+
+start()
+
