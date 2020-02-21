@@ -31,6 +31,7 @@ enum PhotoCategory {
 
 # allPhotosはPhotoを返します
 type Query {
+  me: User
   totalPhotos: Int!
   allPhotos(after: DateTime): [Photo!]!
   totalUsers: Int!
@@ -49,6 +50,8 @@ type AuthPayload {
 }
 # ミューテーションによって新たに投稿されたPhotoを返します 
 type Mutation {
+  fakeUserAuth(githubLogin: ID!): AuthPayload!
+  addFakeUsers(count: Int = 1): [User!]!
   postPhoto(input: PostPhotoInput!): Photo!
   githubAuth(code: String!): AuthPayload!
 }
